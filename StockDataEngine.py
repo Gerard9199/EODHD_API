@@ -85,6 +85,15 @@ class StockDataEngine:
                     data = pd.read_csv(StringIO(response.text))
                 else:
                     data = response.text
+                # Check if 'Adjusted_close' is in the columns
+                if "Adjusted_close" not in data.columns and "Close" in data.columns:
+                    # Intraday data
+                    data["Adjusted_close"] = data["Close"]
+                    intraday_cols = ["Datetime", "Open", "High", "Low", "Close", "Adjusted_close", "Volume"]
+                    data = data[intraday_cols]
+                    # Rename general columns
+                    general_cols = ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
+                    data.columns = general_cols
                 return data
             else:
                 print(f"Error fetching {request_type}: {response.status_code}")
