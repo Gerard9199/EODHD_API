@@ -208,7 +208,7 @@ class StockDataEngine:
                 end = datetime.strptime(end, "%Y-%m-%d %H:%M:%S")
 
             if start is None:
-                start = end - datetime.timedelta(days=max_days)
+                start = end - BDay(max_days)
             else:
                 start = datetime.strptime(start, "%Y-%m-%d %H:%M:%S")
 
@@ -237,7 +237,7 @@ class StockDataEngine:
         date_ranges = []
         while current_start < end:
             # Calculate current end date by adding max_days
-            current_end = current_start + datetime.timedelta(days=max_days)
+            current_end = current_start + BDay(max_days)
             # Ensure current_end does not exceed the overall end date
             if current_end > end:
                 current_end = end
