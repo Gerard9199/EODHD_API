@@ -10,7 +10,7 @@ eod_data = eodhd.download_data(
     period="1d",
     start="2024-01-01",
     end="2024-11-25"
-)
+)["Adj Close"]
 
 # Download intraday data for a single ticker
 intraday_data = eodhd.download_data(
