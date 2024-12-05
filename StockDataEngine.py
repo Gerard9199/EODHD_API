@@ -24,13 +24,12 @@ class StockDataEngine:
         self.api_requests_today = 0
         self.daily_rate_limit = 100000
         self.minute_request_limit = 1000  # Max requests per minute
+        self.second_request_limit = 16    # Approximate max requests per second
         self.calls_remaining = self.minute_request_limit
         self.last_api_requests_date = None
         self.user_info = {}
         self.lock = threading.Lock()
         self.rate_limit_lock = threading.Lock()
-        self.rate_limit_reset_time = time.time() + 60  # Reset every 60 seconds
-        self.rate_limit_semaphore = threading.Semaphore(self.minute_request_limit)
         self.get_user_info()
 
     def _get_timezone(self, timezone):
@@ -93,6 +92,33 @@ class StockDataEngine:
             print(f"Not enough API calls remaining. Required: {required_calls}, Available: {self.calls_remaining}")
             return False
 
+    def _filter_exchange_codes(self, exchange_codes):
+        """
+        Processes the tickers to filter out those with invalid exchange codes.
+    
+        Parameters:
+        - tickers (str or list): The ticker symbol(s).
+    
+        Returns:
+        - tuple: (valid_tickers, invalid_tickers)
+            - valid_tickers: list of tickers without '.' and tickers with '.' where the exchange code exists.
+            - invalid_tickers: list of tickers where the exchange code does not exist in self.exchange_codes.
+        """
+        # Ensure tickers is a list
+        if isinstance(exchange_codes, str):
+            exchange_codes = [exchange_codes]
+    
+        valid_exchange = []
+        invalid_exchange = []
+    
+        for exchange_code in exchange_codes:
+            if exchange_code in self.exchange_codes:
+                valid_exchange.append(exchange_code)
+            else:
+                invalid_exchange.append(exchange_code)
+    
+        return valid_exchange, invalid_exchange
+
     def _check_tickers_code(self, ticker, exchange_code):
         """
         Checks if the given ticker has a exchange code. If not will assume the default code.
@@ -145,6 +171,15 @@ class StockDataEngine:
         return valid_tickers, invalid_tickers
 
     def _extract_url_symbol(self, single_url):
+        """
+        Extract the symbol from url.
+    
+        Parameters:
+        - single_url (str): The API URL to request.
+    
+        Returns:
+        - str: The symbol used in the url.
+        """
         # Extract the ticker from the URL to label
         if "/eod/" in single_url:
             symbol = single_url.split("/eod/")[1].split("?")[0]
@@ -152,6 +187,26 @@ class StockDataEngine:
             symbol = single_url.split("/intraday/")[1].split("?")[0]
         else:
             symbol = "Unknown"
+
+        return symbol
+
+    def _replace_tickers(self, symbol, exchange_code):
+        """
+        Adjusts the ticker symbol based on the exchange code.
+
+        Parameters:
+        - symbol (str): The original ticker symbol.
+        - exchange_code (str): The default exchange code.
+
+        Returns:
+        - str: The adjusted ticker symbol.
+        """
+        if "." in symbol:
+            symbol_comp = symbol.split(".")
+            ticker = symbol_comp[0]
+            code = symbol_comp[1]
+            if code == exchange_code:
+                return ticker
 
         return symbol
 
@@ -210,40 +265,87 @@ class StockDataEngine:
     def _fetch_data(self, single_url, fmt, cost_of_calls):
         """
         Fetches data for a single URL with rate limiting.
+        """
+        symbol = self._extract_url_symbol(single_url)
+        max_retries = 5
+        retry_delay = 1  # Start with a 1-second delay
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(single_url)
+                if response.status_code == 200:
+                    with self.lock:
+                        self.api_requests_today += cost_of_calls
+                        self.calls_remaining -= cost_of_calls
+                    # Parse and return data
+                    if fmt == "json":
+                        df = pd.DataFrame(response.json())
+                    elif fmt == "csv":
+                        df = pd.read_csv(StringIO(response.text))
+                    else:
+                        df = pd.DataFrame()  # Return an empty DataFrame if format is unexpected
+                    return df
+                elif response.status_code == 429:
+                    # Too Many Requests
+                    print(f"Received 429 Too Many Requests for {symbol}, retrying after {retry_delay} seconds.")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    # Log the error and return an empty DataFrame
+                    print(f"Error fetching data for {symbol}: Status code {response.status_code}")
+                    return pd.DataFrame()
+            except Exception as e:
+                # Log the error and return an empty DataFrame
+                print(f"Exception fetching data for {symbol}: {e}")
+                return pd.DataFrame()
+        # After max retries
+        print(f"Failed to fetch data for {symbol} after {max_retries} attempts.")
+        return pd.DataFrame()
 
+    def _fetch_ticker_data(self, url, fmt, cost_of_calls):
+        """
+        Fetches ticker data for a single URL with retry logic for rate limiting.
+    
         Parameters:
-        - single_url (str): The API URL to request.
+        - url (str): The API URL to request.
         - fmt (str): The format of the response ('csv' or 'json').
         - cost_of_calls (int): The cost of API calls.
-
+    
         Returns:
         - pd.DataFrame: The data fetched from the API.
         """
-        # Acquire the rate limit semaphore
-        self._acquire_rate_limit()
-
-        try:
-            response = requests.get(single_url)
-            if response.status_code == 200:
-                with self.lock:
-                    self.api_requests_today += cost_of_calls
-                    self.calls_remaining -= cost_of_calls
-                # Parse and return data
-                if fmt == "json":
-                    df = pd.DataFrame(response.json())
-                elif fmt == "csv":
-                    df = pd.read_csv(StringIO(response.text))
+        max_retries = 5
+        retry_delay = 1  # Start with a 1-second delay
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(url)
+                if response.status_code == 200:
+                    with self.lock:
+                        self.api_requests_today += cost_of_calls
+                        self.calls_remaining -= cost_of_calls
+                    # Parse and return data
+                    if fmt == "json":
+                        df = pd.DataFrame(response.json())
+                    elif fmt == "csv":
+                        df = pd.read_csv(StringIO(response.text))
+                    else:
+                        df = pd.DataFrame()  # Return an empty DataFrame if format is unexpected
+                    return df
+                elif response.status_code == 429:
+                    # Too Many Requests
+                    print(f"Received 429 Too Many Requests for tickers request, retrying after {retry_delay} seconds.")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
                 else:
-                    df = response.text
-                return df
-        except Exception as e:
-            # Log the error and return an empty DataFrame
-            print(f"Error fetching data from {single_url}: {e}")
-            return pd.DataFrame()
-            
-        finally:
-            # Release the semaphore
-            self.rate_limit_semaphore.release()
+                    # Log the error and return an empty DataFrame
+                    print(f"Error fetching tickers data: Status code {response.status_code}")
+                    return pd.DataFrame()
+            except Exception as e:
+                # Log the error and return an empty DataFrame
+                print(f"Exception fetching tickers data: {e}")
+                return pd.DataFrame()
+        # After max retries
+        print(f"Failed to fetch tickers data after {max_retries} attempts.")
+        return pd.DataFrame()
 
     def _process_dataframe(self, df):
         """
@@ -255,6 +357,9 @@ class StockDataEngine:
         Returns:
         - pd.DataFrame: The processed DataFrame.
         """
+        if df.empty:
+            return df  # Return the empty DataFrame
+            
         # Check if 'Adjusted_close' is in the columns
         if "Adjusted_close" not in df.columns and "Close" in df.columns:
             # Intraday data
@@ -283,7 +388,7 @@ class StockDataEngine:
     
         return df
 
-    def _make_api_request(self, url, cost_of_calls, request_type, fmt):
+    def _make_api_request(self, url, exchange_code, cost_of_calls, request_type, fmt):
         """
         Makes the API request(s) and processes the response concurrently.
     
@@ -299,88 +404,142 @@ class StockDataEngine:
             - data: The processed DataFrame.
         """
         empty_stocks = []
-    
+
         # If the URL is a single string or a list with one element
-        if ((isinstance(url, list) and len(url) < 2) or isinstance(url, str)) and (request_type == "ticker" or request_type == "data"):
-            if isinstance(url, list):
-                url = url[0]
-    
-            # Make the request
-            response = requests.get(url)
-            symbol = self._extract_url_symbol(url)
-            self.get_user_info()
-            if response.status_code == 200:
-                self.api_requests_today += cost_of_calls
-                # Parse and return data
-                if fmt == "json":
-                    df = pd.DataFrame(response.json())
-                elif fmt == "csv":
-                    df = pd.read_csv(StringIO(response.text))
-                else:
-                    df = response.text
-    
+        if request_type == "data":
+            if ((isinstance(url, list) and len(url) < 2) or isinstance(url, str)):
+                if isinstance(url, list):
+                    url = url[0]
+        
+                # Make the request
+                df = self._fetch_data(url, fmt, cost_of_calls)
+                symbol = self._extract_url_symbol(url)
+                # Adjust the symbol
+                symbol = self._replace_tickers(symbol, exchange_code)
+
                 if df.empty:
                     empty_stocks.append(symbol)
                     return (empty_stocks, pd.DataFrame())
-    
-                # Process DataFrame
+
                 df = self._process_dataframe(df)
-                return (empty_stocks, df)
-            else:
-                empty_stocks.append(symbol)
-                print(f"Error fetching {symbol} {request_type}: {response.status_code}")
-                return (empty_stocks, pd.DataFrame())
-    
-        # If the URL is a list with more than one element and the request_type is 'data'
-        elif isinstance(url, list) and len(url) > 1 and request_type == "data":
-            data_frames = []
-            total_urls = len(url)
-    
-            max_workers = 16  # Limit the number of concurrent threads
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all the requests to the executor
-                future_to_url = {executor.submit(self._fetch_data, single_url, fmt, cost_of_calls): single_url for single_url in url}
 
-                for idx, future in enumerate(as_completed(future_to_url), start=1):
-                    single_url = future_to_url[future]
-                    symbol = self._extract_url_symbol(single_url)
+                # Adjust columns to be MultiIndex with ticker
+                df.columns = pd.MultiIndex.from_product([[symbol], df.columns])
 
-                    try:
-                        df = future.result()
-                        if df.empty:
-                            empty_stocks.append(symbol)
-                        else:
-                            # Process DataFrame
-                            df = self._process_dataframe(df)
-                            data_frames.append((symbol, df))
-                    except Exception as e:
-                        empty_stocks.append(symbol)
-                        print(f"\nError fetching data for {symbol}: {e}")
-
-                    # After processing each URL, print the progress
-                    self._print_progress(idx, total_urls)
-    
-            # Concatenate DataFrames into a MultiIndex with the required format
-            if data_frames:
-                # Create a list of all tickers
-                tickers = [symbol for symbol, _ in data_frames]
-                # Create a list of all DataFrames
-                dfs = [df for _, df in data_frames]
-    
-                # Concatenate the DataFrames along the columns
-                df_combined = pd.concat(dfs, axis=1, keys=tickers)
-    
                 # Rearrange the levels of the MultiIndex
-                df_combined.columns = df_combined.columns.swaplevel(0, 1)
-    
+                df.columns = df.columns.swaplevel(0, 1)
+
                 # Sort the column levels according to the desired format
                 desired_order = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
-                df_combined = df_combined.reindex(columns=desired_order, level=0)
+                df = df.reindex(columns=desired_order, level=0)
+
+                return (empty_stocks, df)
+        
+            # If the URL is a list with more than one element and the request_type is 'data'
+            elif isinstance(url, list) and len(url) > 1:
+                data_frames = []
+                total_urls = len(url)
+        
+                max_workers = self.second_request_limit  # Limit the number of concurrent threads
+                per_second_limit = self.second_request_limit
+                url_chunks = [url[i:i + per_second_limit] for i in range(0, len(url), per_second_limit)]
+                idx = 0
+                for chunk in url_chunks:
+                    start_time = time.time()
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        future_to_url = {executor.submit(self._fetch_data, single_url, fmt, cost_of_calls): single_url for single_url in chunk}
+                        for future in as_completed(future_to_url):
+                            single_url = future_to_url[future]
+                            symbol = self._extract_url_symbol(single_url)
+                            symbol = self._replace_tickers(symbol, exchange_code)
+                            idx += 1
+                            try:
+                                df = future.result()
+                                if df.empty:
+                                    empty_stocks.append(symbol)
+                                else:
+                                    df = self._process_dataframe(df)
+                                    data_frames.append((symbol, df))
+                            except Exception as e:
+                                empty_stocks.append(symbol)
+                                print(f"\nError fetching data for {symbol}: {e}")
     
-                return (empty_stocks, df_combined)
+                            # After processing each URL, print the progress
+                            self._print_progress(idx, total_urls)
+                    # Wait until 1 second has passed since start_time
+                    elapsed = time.time() - start_time
+                    if elapsed < 1:
+                        time.sleep(1 - elapsed)
+                print()  # Move to the next line after progress bar
+        
+                # Concatenate DataFrames into a MultiIndex with the required format
+                if data_frames:
+                    # Create a list of all tickers
+                    tickers = [symbol for symbol, _ in data_frames]
+                    # Create a list of all DataFrames
+                    dfs = [df for _, df in data_frames]
+        
+                    # Concatenate the DataFrames along the columns
+                    df_combined = pd.concat(dfs, axis=1, keys=tickers)
+        
+                    # Rearrange the levels of the MultiIndex
+                    df_combined.columns = df_combined.columns.swaplevel(0, 1)
+        
+                    # Sort the column levels according to the desired format
+                    desired_order = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+                    df_combined = df_combined.reindex(columns=desired_order, level=0)
+        
+                    return (empty_stocks, df_combined)
+                else:
+                    return (empty_stocks, pd.DataFrame())
+
+        elif request_type == "tickers":
+            # Handle 'tickers' requests
+            if isinstance(url, list) and len(url) > 1:
+                # Multiple URLs (unlikely for tickers, but handle just in case)
+                data_frames = []
+                total_urls = len(url)
+                max_workers = self.second_request_limit  # Limit the number of concurrent threads
+                per_second_limit = self.second_request_limit
+                url_chunks = [url[i:i + per_second_limit] for i in range(0, len(url), per_second_limit)]
+                idx = 0
+    
+                for chunk in url_chunks:
+                    start_time = time.time()
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        future_to_url = {executor.submit(self._fetch_ticker_data, single_url, fmt, cost_of_calls): single_url for single_url in chunk}
+                        for future in as_completed(future_to_url):
+                            single_url = future_to_url[future]
+                            idx += 1
+                            try:
+                                df = future.result()
+                                data_frames.append(df)
+                            except Exception as e:
+                                print(f"\nError fetching tickers data: {e}")
+    
+                            # After processing each URL, print the progress
+                            self._print_progress(idx, total_urls)
+                    # Wait until 1 second has passed since start_time
+                    elapsed = time.time() - start_time
+                    if elapsed < 1:
+                        time.sleep(1 - elapsed)
+                print()  # Move to the next line after progress bar
+    
+                # Concatenate DataFrames
+                if data_frames:
+                    df_combined = pd.concat(data_frames, ignore_index=True)
+                    return df_combined
+                else:
+                    return pd.DataFrame()
+    
             else:
-                return (empty_stocks, pd.DataFrame())
+                # Single URL
+                if isinstance(url, list):
+                    url = url[0]
     
+                df = self._fetch_ticker_data(url, fmt, cost_of_calls)
+                return df
+
         else:
             print("Invalid parameters for _make_api_request.")
             return (empty_stocks, pd.DataFrame())
@@ -544,10 +703,16 @@ class StockDataEngine:
                         url.append(url_)
 
         elif request_type == "tickers":
-            url = (
-                f"https://eodhd.com/api/exchange-symbol-list/{exchange_code}"
-                f"?api_token={self.api_token}&fmt={fmt}&delisted={delisted_param}"
-            )
+            url = []
+            (valid_exchange, invalid_exchange) = self._filter_exchange_codes(exchange_code)
+            
+            if len(valid_exchange) > 0:
+                for valid_code in valid_exchange:
+                    url_ = (
+                        f"https://eodhd.com/api/exchange-symbol-list/{valid_code}"
+                        f"?api_token={self.api_token}&fmt={fmt}&delisted={delisted_param}"
+                    )
+                    url.append(url_)
 
         else:
             raise ValueError("Invalid request type.")
@@ -626,9 +791,13 @@ class StockDataEngine:
             print("Not enough API calls available for data request.")
             return pd.DataFrame()
 
-        (empty_stocks, data) = self._make_api_request(url=url, cost_of_calls=cost_of_calls, request_type=request_type, fmt=fmt)
-
+        (empty_stocks, data) = self._make_api_request(url=url, exchange_code=exchange_code, cost_of_calls=cost_of_calls, request_type=request_type, fmt=fmt)
+        
+        self.get_user_info()
+        
         if invalid_tickers:
+            # Save invalid tickers
+            self.invalid_tickers = invalid_tickers
             # Format the tickers into a string
             invalid_tickers_str = ', '.join(invalid_tickers)
             # Create the exception message
@@ -637,6 +806,8 @@ class StockDataEngine:
             print(invalid_exception_message)
 
         if empty_stocks:
+            # Save empty stocks
+            self.empty_stocks = empty_stocks
             # Format the tickers into a string
             tickers_str = ', '.join(empty_stocks)
             # Create the exception message
@@ -648,7 +819,9 @@ class StockDataEngine:
             return pd.DataFrame()
 
         else:
-            return data.sort_index()
+            data.index = pd.to_datetime(data.index, yearfirst=True)
+            data = data.sort_index()
+            return data
 
     def get_tickers(self, exchange_code, delisted=False, fmt="json", request_type="tickers"):
         """
