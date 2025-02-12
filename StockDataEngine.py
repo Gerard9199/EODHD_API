@@ -9,7 +9,7 @@ import threading
 import time
 
 class StockDataEngine:
-    def __init__(self, api_token, exchanges_path, timezone="Mexico_City"):
+    def __init__(self, api_token, timezone="Mexico_City"):
         """
         Initializes the StockDataExtractor with the provided API token and path to the exchanges data.
 
@@ -18,8 +18,77 @@ class StockDataEngine:
         - exchanges_path (str): Path to the parquet file containing exchange data.
         """
         self.api_token = api_token
-        self.exchanges = pd.read_parquet(exchanges_path)
-        self.exchange_codes = set(self.exchanges["Code"].tolist())
+        self.exchanges = {
+            'US': 'USA Stocks',
+            'V': 'Canada Stocks',
+            'LSE': 'London Exchange',
+            'TO': 'Toronto Exchange',
+            'NEO': 'NEO Exchange',
+            'BE': 'Berlin Exchange',
+            'HM': 'Hamburg Exchange',
+            'XETRA': 'XETRA Exchange',
+            'DU': 'Dusseldorf Exchange',
+            'F': 'Frankfurt Exchange',
+            'HA': 'Hanover Exchange',
+            'MU': 'Munich Exchange',
+            'STU': 'Stuttgart Exchange',
+            'LU': 'Luxembourg Stock Exchange',
+            'VI': 'Vienna Exchange',
+            'PA': 'Euronext Paris',
+            'BR': 'Euronext Brussels',
+            'LS': 'Euronext Lisbon',
+            'VX': 'Swiss Exchange',
+            'AS': 'Euronext Amsterdam',
+            'SW': 'SIX Swiss Exchange',
+            'MC': 'Madrid Exchange',
+            'IR': 'Irish Exchange',
+            'IC': 'Iceland Exchange',
+            'HE': 'Helsinki Exchange',
+            'OL': 'Oslo Stock Exchange',
+            'ST': 'Stockholm Exchange',
+            'CO': 'Copenhagen Exchange',
+            'TA': 'Tel Aviv Exchange',
+            'HK': 'Hong Kong Exchange',
+            'KO': 'Korea Stock Exchange',
+            'KQ': 'KOSDAQ',
+            'PSE': 'Philippine Stock Exchange',
+            'BUD': 'Budapest Stock Exchange',
+            'WAR': 'Warsaw Stock Exchange',
+            'SG': 'Singapore Exchange',
+            'BSE': 'Bombay Exchange',
+            'SHE': 'Shenzhen Exchange',
+            'SN': 'Chilean Stock Exchange',
+            'AT': 'Athens Exchange',
+            'JK': 'Jakarta Exchange',
+            'JSE': 'Johannesburg Exchange',
+            'BK': 'Thailand Exchange',
+            'SR': 'Saudi Arabia Exchange',
+            'NSE': 'NSE (India)',
+            'KAR': 'Karachi Stock Exchange',
+            'AU': 'Australia Exchange',
+            'SHG': 'Shanghai Exchange',
+            'CM': 'Colombo Stock Exchange',
+            'VN': 'Vietnam Stocks',
+            'KLSE': 'Kuala Lumpur Exchange',
+            'RO': 'Bucharest Stock Exchange',
+            'SA': 'Sao Paolo Exchange',
+            'BA': 'Buenos Aires Exchange',
+            'MX': 'Mexican Exchange',
+            'IL': 'London IL',
+            'ZSE': 'Zagreb Stock Exchange',
+            'EUFUND': 'Europe Fund Virtual Exchange',
+            'TW': 'Taiwan Exchange',
+            'LIM': 'Bolsa de Valores de Lima',
+            'GBOND': 'Government Bonds',
+            'MONEY': 'Money Market Virtual Exchange',
+            'CC': 'Cryptocurrencies',
+            'BOND': 'Bond Virtual Exchange',
+            'MCX': 'MICEX Moscow Russia',
+            'TWO': 'Taiwan OTC Exchange',
+            'FOREX': 'FOREX',
+            'IS': 'Istanbul Stock Exchange'
+        }
+        self.exchange_codes = list(self.exchanges.keys())
         self.timezone = self._get_timezone(timezone)
         self.api_requests_today = 0
         self.daily_rate_limit = 100000
@@ -823,7 +892,7 @@ class StockDataEngine:
             data = data.sort_index()
             return data
 
-    def get_tickers(self, exchange_code, delisted=False, fmt="json", request_type="tickers"):
+    def get_tickers(self, exchange_code, delisted=False, fmt="csv", request_type="tickers"):
         """
         Retrieves the list of tickers for the specified exchange.
 
